@@ -1,0 +1,295 @@
+---
+title: "What AROUSE The Sense of Happiness of Different Groups of People"
+author: "Jiayi Cui, jc4884"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Text mining and data preparation
+### Load packages and data
+```{r, warning=FALSE, message=FALSE}
+library(tm)
+library(tidytext)
+library(tidyverse)
+library(DT)
+library(scales)
+library(wordcloud2)
+library(gridExtra)
+library(ngram)
+library(shiny)
+library(ggplot2)
+library(RColorBrewer)
+library(wordcloud)
+```
+```{r, warning=FALSE, message=FALSE}
+urlfile_cleansed<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/cleaned_hm.csv'
+hm_data <- read_csv(urlfile_cleansed)
+urlfile_demo<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/demographic.csv'
+demo_data <- read_csv(urlfile_demo)
+```
+
+### Text processing
+```{r}
+corpus <- VCorpus(VectorSource(hm_data$cleaned_hm))%>%
+  tm_map(content_transformer(tolower))%>%
+  tm_map(removePunctuation)%>%
+  tm_map(removeNumbers)%>%
+  tm_map(removeWords, character(0))%>%
+  tm_map(stripWhitespace)
+
+stemmed <- tm_map(corpus, stemDocument) %>%
+  tidy() %>%
+  select(text)
+
+dict <- tidy(corpus) %>%
+  select(text) %>%
+  unnest_tokens(dictionary, text)
+```
+```{r}
+data("stop_words")
+
+word <- c("happy","ago","yesterday","lot","today","months","month",
+                 "happier","happiest","last","week","past")
+
+stop_words <- stop_words %>%
+  bind_rows(mutate(tibble(word), lexicon = "updated"))
+
+completed <- stemmed %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(stems, text) %>%
+  bind_cols(dict) %>%
+  anti_join(stop_words, by = c("dictionary" = "word"))
+```
+```{r, warning=FALSE, message=FALSE}
+completed <- completed %>%
+  group_by(stems) %>%
+  count(dictionary) %>%
+  mutate(word = dictionary[which.max(n)]) %>%
+  ungroup() %>%
+  select(stems, word) %>%
+  distinct() %>%
+  right_join(completed) %>%
+  select(-stems)
+
+completed <- completed %>%
+  group_by(id) %>%
+  summarise(text = str_c(word, collapse = " ")) %>%
+  ungroup()
+
+hm_data <- hm_data %>%
+  mutate(id = row_number()) %>%
+  inner_join(completed)
+```
+### Export processed data to output
+```{r}
+write_csv(hm_data, "../output/processed_moments.csv")
+```
+### Merge happy moments data with worker information
+```{r}
+merge_data <- hm_data %>%
+  inner_join(demo_data, by = "wid") %>%
+  select(wid,
+         original_hm,
+         gender, 
+         marital, 
+         parenthood,
+         reflection_period,
+         age, 
+         country, 
+         ground_truth_category, 
+         text) %>%
+  mutate(count = sapply(hm_data$text, wordcount)) %>%
+  filter(gender %in% c("m", "f")) %>%
+  filter(marital %in% c("single", "married")) %>%
+  filter(parenthood %in% c("n", "y")) %>%
+  filter(reflection_period %in% c("24h", "3m")) %>%
+  mutate(reflection_period = fct_recode(reflection_period, 
+                                        months_3 = "3m", hours_24 = "24h"))
+```
+### Creat single and pair word bags
+```{r, warning=FALSE, message=FALSE}
+bag_of_words <- merge_data %>%
+  unnest_tokens(word, text)
+
+hm_bigrams <- merge_data %>%
+  filter(count != 1) %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+bigram_counts <- hm_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  count(word1, word2, sort = TRUE)
+```
+
+
+# Happy moment key words
+```{r}
+word_count <- merge_data %>%
+  unnest_tokens(word, text) %>%
+  count(word, sort = TRUE)
+word_df <- data.frame(word = names(word_count), count = word_count)
+word_50 <- word_df[1:50,]
+mycolors <- brewer.pal(8, 'Dark2') 
+wordcloud(word_50$count.word,word_df$count.n, random.order = FALSE, random.color= FALSE, colors = mycolors)
+```
+    
+    The 50 most frequent words contain words that are natually connected with happiness such as friend, family, love and surprise. Also, there are words like day, time, finally, called that have a vague connection with happiness but we can make resonable inference about the connection.
+```{r}
+word_ten <- word_df[1:10,]
+ggplot(data=word_ten,aes(x=count.word, y=count.n)) + geom_bar(stat = 'identity') + coord_flip()
+```
+
+# Question: what sustance of happiness did the most frequent words reveal?
+    Top 10 most frequent words are 'friend, day, time, family, watched, home, played, feel, finally, found'. Among them, 'friend', 'family' and 'watched', 'played' show the actual things or things people do that arouse the sense of happiness, while 'day', 'time' and 'feel' may be infered as the words that  people use to describe the sense of happiness. Words like 'finally', 'found' sound more like indicating a sense of achievement, which lead to sense of happiness.
+    
+## Why the most frequent words do not straightly point to actual things that make us happy?
+### Because they apply to almost every one.
+    As the top 10 words about happiness, these words apply to all kinds of people, male or female, married or single, elderly or students. Therefore, there're only a few words talking about actual things that can make all groups of people happy, such as 'family' and 'friend', while most of the top 10 words, are talking about things that are not so specific, just like 'day', 'time' and 'feel', which describe happiness itself, and can't be too specific. 
+    To dig into things that arouse the sense of happiness, we need to analyze by group.
+    
+# Happy monment key word by property
+```{r, warning=FALSE, message=FALSE}
+gender_word <- bag_of_words %>%
+  count(gender, word) %>%
+  group_by(gender) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(gender, proportion)
+    
+  ggplot(gender_word, 
+         aes_string(x = colnames(gender_word)[2], y = colnames(gender_word)[3]),
+         color = abs(colnames(gender_word)[3] - colnames(gender_word)[2])) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 1, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme(legend.position="none")
+```
+    
+    The two genders actually have common things that arouse their happiness, although that may be expressed in different words. For example, husband and boyfriend are making female happy, while wife and girlfriend are making male happy. We can summarize that spouse or lover makes people happy. Meanwhile, 'birthday', 'house', 'ate', 'video', 'buy', 'kids' are things that provide happiness to both groups. 
+```{r, warning=FALSE, message=FALSE}
+marital_word <- bag_of_words %>%
+  count(marital, word) %>%
+  group_by(marital) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(marital, proportion)
+    
+  ggplot(marital_word, 
+         aes_string(x = colnames(marital_word)[2], y = colnames(marital_word)[3]),
+         color = abs(colnames(marital_word)[3] - colnames(marital_word)[2])) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 1, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme(legend.position="none")
+```
+    
+    But if we group people by their marital state, the two groups have less in common. More specifically, married people have things that make them happy, which are not owned by the single group. Happiness of the married is often associated with kids, including words 'daughter', 'baby', 'child'. The common things of these two groups are 'friend', 'birthday', 'finally', 'ate', 'cat', 'book', 'house', and, lover. Among these words, 'finally' is confusing, which we will discuss later. 
+```{r, warning=FALSE, message=FALSE}
+parent_word <- bag_of_words %>%
+  count(parenthood, word) %>%
+  group_by(parenthood) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(parenthood, proportion)
+    
+  ggplot(parent_word, 
+         aes_string(x = colnames(parent_word)[2], y = colnames(parent_word)[3]),
+         color = abs(colnames(parent_word)[3] - colnames(parent_word)[2])) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 1, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme(legend.position="none")
+```
+```{r, warning=FALSE, message=FALSE}
+reflect_word <- bag_of_words %>%
+  count(reflection_period, word) %>%
+  group_by(reflection_period) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(reflection_period, proportion)
+    
+  ggplot(reflect_word, 
+         aes_string(x = colnames(reflect_word)[2], y = colnames(reflect_word)[3]),
+         color = abs(colnames(reflect_word)[3] - colnames(reflect_word)[2])) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 1, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme(legend.position="none")
+```
+    
+    One thing that's interesting I found in this graph is the word 'ate'. This word appears at the top-right corner of all the 4 graphs above, showing that eating arouse the sense of happiness among all groups of people, both in long and short period. But here we see eating are more likely to make people happy in a short period, and can be much more specific. For example, under the 45 degree line, we see words like 'ice' (which is probably 'ice cream'), 'delicious', 'cup', 'cheese', 'bread'.
+    
+# What do confusing words mean?
+    We made some guesses about confusing words above like 'ice', 'finally', 'watched'. Now we may use bigram analysis to see what they actually mean.
+```{r, warning=FALSE, message=FALSE}
+gender_bigrams <- hm_bigrams %>%
+  count(gender, bigram, sort = TRUE) %>%
+  group_by(gender) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(bigram = reorder(bigram, n))
+
+ggplot(data = gender_bigrams, aes(x = bigram, y = n)) + geom_bar(stat = 'identity') +
+  facet_grid(.~gender) + coord_flip()
+```
+    
+    Remember we saw 'video' made both male and female happy. Here 'video' appears in both male and female's top 10 happiest word pairs. Furthermore, 'video game' is the most frequent word pair showing in male's happy momonts. We also found word 'played video' in  the top 10 word pairs of male. If we use trigram, 'played video game' should be top one expression of male. We conclude that playing video game is an important thing that arouse sense of happiness among male, and it also makes female happy but not as strong.
+    We also find out what 'ice' and 'watched' mean. 'Ice' means 'ice cream', just like we guessed. Interestingly, 'met friend' is in the top 10 word pairs of male while 'read book' is in that of female.
+```{r, warning=FALSE, message=FALSE}
+marital_bigrams <- hm_bigrams %>%
+  count(marital, bigram, sort = TRUE) %>%
+  group_by(marital) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(bigram = reorder(bigram, n))
+
+ggplot(data = marital_bigrams, aes(x = bigram, y = n)) + geom_bar(stat = 'identity') +
+  facet_grid(.~marital) + coord_flip()
+```
+    
+    Again, video game shows in both married and single's top 10 word pairs, but playing video game is clearly more important in arosing the sense of happiness of single than that of married. Single people are happy because of friend, while married people are arosed the sense of happiness by reading book.
+    Another finding is the pair 'makes feel'. Note that the pair is 'makes feel' instead of 'feel happy', which probably indicates that the emotion behind 'feel' is various. This indicates that people's sense of happiness may not be directly arosed by actual things, but can also be aroused by another sense, such as sense of achievement. And compared to the single group, married people's sense of happiness is more likely to be arosed by other sense and emotion.
+
+```{r, warning=FALSE, message=FALSE}
+parent_bigrams <- hm_bigrams %>%
+  count(parenthood, bigram, sort = TRUE) %>%
+  group_by(parenthood) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(bigram = reorder(bigram, n))
+
+ggplot(data = parent_bigrams, aes(x = bigram, y = n)) + geom_bar(stat = 'identity') +
+  facet_grid(.~parenthood) + coord_flip()
+```
+    
+    One thing I would point out here is the word pair 'bought car'. This pair has never appeared in other graphs before, so buying a car is a particular thing that arouses the sense of happiness of parents.
+```{r, warning=FALSE, message=FALSE}
+reflect_bigrams <- hm_bigrams %>%
+  count(reflection_period, bigram, sort = TRUE) %>%
+  group_by(reflection_period) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(bigram = reorder(bigram, n))
+
+ggplot(data = reflect_bigrams, aes(x = bigram, y = n)) + geom_bar(stat = 'identity') +
+  facet_grid(.~reflection_period) + coord_flip()
+```
+    
+    There are basically 3 things that arouse all groups of people's sense of happiness for both short and long period of time, which are video game, watching movie and ice cream. And almost all groups of  people are equally happy because of 'mother day' and 'birthday party'. However, word pairs about 'mother day' and birthday are among top pairs in a long period but not in short period. This may be because mothers' day and birthday do not happen everyday, which makes them appear less frequently than other word pairs. on the other hand, talking with friend and watching favorite something make people happy in 24 hours but don't last for long. Buying a car is one of the top 10 happiest moments in 3-month's period.
+    
+# Conclusion
+    What arouse the sense of happiness have clear difference among different groups of people, but there are several things in common: video game, ice cream, watching movie, birthday party, and mothers' day. on the other hand, certain things are important in arousing the sense of happiness for certain group of people. Friend is an important source of happiness for male, the single, and people who are not parents, while reading books is important to the happiness of female and the married. Particularly, buying a car is one of the top things that make people who are parents happy, and is also an important thing that arouses happiness in a long period.
